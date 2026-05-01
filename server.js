@@ -37,7 +37,7 @@ io.on('connection', (socket) => {
   socket.on('createWebRtcTransport', async ({ sender }, callback) => {
     const room = rooms.get(socket.roomId);
     const transport = await room.router.createWebRtcTransport({
-      listenIps: [{ ip: '0.0.0.0', announcedIp: '192.168.0.105' }], 
+      listenIps: [{ ip: '0.0.0.0', announcedIp: '142.93.204.148' }],
       enableUdp: true, enableTcp: true, preferUdp: true,
     });
 
