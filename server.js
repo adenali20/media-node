@@ -2,7 +2,6 @@ const mediasoup = require('mediasoup');
 const express = require('express');
 const { Server } = require('socket.io');
 const http = require('http');
-const { log } = require('console');
 
 const app = express();
 const server = http.createServer(app);
@@ -14,7 +13,12 @@ const consumers = new Map();
 
 const mediaCodecs = [
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
-  { kind: 'video', mimeType: 'video/VP8', clockRate: 90000 }
+  { 
+    kind: 'video', 
+    mimeType: 'video/VP8', 
+    clockRate: 90000,
+    parameters: { 'x-google-start-bitrate': 1000 } 
+  }
 ];
 
 (async () => {
@@ -53,12 +57,7 @@ io.on('connection', (socket) => {
     socket.transports.set(transport.id, transport);
 
     callback({
-      params: {
-        id: transport.id,
-        iceParameters: transport.iceParameters,
-        iceCandidates: transport.iceCandidates,
-        dtlsParameters: transport.dtlsParameters,
-      }
+      params: { id: transport.id, iceParameters: transport.iceParameters, iceCandidates: transport.iceCandidates, dtlsParameters: transport.dtlsParameters }
     });
   });
 
@@ -73,10 +72,14 @@ io.on('connection', (socket) => {
     const producer = await transport.produce({ kind, rtpParameters });
     const room = rooms.get(socket.roomId);
 
-    // STORE the producer instance so we can call .close() later
+    // Register audio producers for speaker detection
+    if (kind === 'audio') {
+        room.audioLevelObserver.addProducer({ producerId: producer.id });
+    }
+
     room.producers.push({ 
         id: producer.id, 
-        producer, // Added this
+        producer, 
         socketId: socket.id, 
         username: socket.username 
     });
@@ -102,12 +105,7 @@ io.on('connection', (socket) => {
 
       consumers.set(consumer.id, consumer);
       callback({
-        params: {
-          id: consumer.id,
-          producerId: remoteProducerId,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
-        }
+        params: { id: consumer.id, producerId: remoteProducerId, kind: consumer.kind, rtpParameters: consumer.rtpParameters }
       });
     }
   });
@@ -120,18 +118,13 @@ io.on('connection', (socket) => {
   socket.on('disconnect', () => {
     if (socket.roomId && rooms.has(socket.roomId)) {
       const room = rooms.get(socket.roomId);
-      
-      // 1. Find producers owned by this socket
       const userProducers = room.producers.filter(p => p.socketId === socket.id);
       
       userProducers.forEach(p => {
-          // 2. Close the Mediasoup producer instance
           p.producer.close(); 
-          // 3. Notify others to remove this video from their UI
           socket.to(socket.roomId).emit('producerClosed', { producerId: p.id });
       });
 
-      // 4. Remove from the local producers list
       room.producers = room.producers.filter(p => p.socketId !== socket.id);
     }
   });
@@ -140,7 +133,24 @@ io.on('connection', (socket) => {
 async function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
     const router = await worker.createRouter({ mediaCodecs });
-    rooms.set(roomId, { router, producers: [] });
+    
+    // Create AudioLevelObserver to monitor volumes
+    const audioLevelObserver = await router.createAudioLevelObserver({
+        interval: 400,
+        threshold: -70
+    });
+
+    audioLevelObserver.on('volumes', (volumes) => {
+        const { producer, volume } = volumes[0]; // Get the loudest speaker
+        // The frontend will use this producerId to look up the username and highlight the box
+        io.to(roomId).emit('activeSpeaker', { producerId: producer.id });
+    });
+
+    audioLevelObserver.on('silence', () => {
+        io.to(roomId).emit('activeSpeaker', { producerId: null });
+    });
+
+    rooms.set(roomId, { router, producers: [], audioLevelObserver });
   }
   return rooms.get(roomId);
 }
