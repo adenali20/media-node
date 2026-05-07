@@ -26,11 +26,17 @@ const mediaCodecs = [
 })();
 
 io.on('connection', (socket) => {
-  socket.on('joinRoom', async ({ roomId }, callback) => {
+  socket.on('joinRoom', async ({ roomId, username }, callback) => {
     const room = await getOrCreateRoom(roomId);
     socket.join(roomId);
     socket.roomId = roomId;
-    const existingProducers = room.producers.map(p => p.id);
+    socket.username = username;
+
+    const existingProducers = room.producers.map(p => ({ 
+        id: p.id, 
+        username: p.username 
+    }));
+    
     callback({ rtpCapabilities: room.router.rtpCapabilities, existingProducers });
   });
 
@@ -38,7 +44,9 @@ io.on('connection', (socket) => {
     const room = rooms.get(socket.roomId);
     const transport = await room.router.createWebRtcTransport({
       listenIps: [{ ip: '0.0.0.0', announcedIp: '142.93.204.148' }],
-      enableUdp: true, enableTcp: true, preferUdp: true,
+      enableUdp: true,
+      enableTcp: true,
+      preferUdp: true,
     });
 
     socket.transports = socket.transports || new Map();
@@ -65,9 +73,19 @@ io.on('connection', (socket) => {
     const producer = await transport.produce({ kind, rtpParameters });
     const room = rooms.get(socket.roomId);
 
-    room.producers.push({ id: producer.id, socketId: socket.id });
-    socket.to(socket.roomId).emit('newProducer', { producerId: producer.id });
-    
+    // STORE the producer instance so we can call .close() later
+    room.producers.push({ 
+        id: producer.id, 
+        producer, // Added this
+        socketId: socket.id, 
+        username: socket.username 
+    });
+
+    socket.to(socket.roomId).emit('newProducer', { 
+        producerId: producer.id, 
+        username: socket.username 
+    });
+
     callback({ id: producer.id });
   });
 
@@ -95,15 +113,26 @@ io.on('connection', (socket) => {
   });
 
   socket.on('consumerResume', async ({ consumerId }) => {
-    log('Resuming consumer', consumerId);
     const consumer = consumers.get(consumerId);
     if (consumer) await consumer.resume();
   });
 
   socket.on('disconnect', () => {
     if (socket.roomId && rooms.has(socket.roomId)) {
-        const room = rooms.get(socket.roomId);
-        room.producers = room.producers.filter(p => p.socketId !== socket.id);
+      const room = rooms.get(socket.roomId);
+      
+      // 1. Find producers owned by this socket
+      const userProducers = room.producers.filter(p => p.socketId === socket.id);
+      
+      userProducers.forEach(p => {
+          // 2. Close the Mediasoup producer instance
+          p.producer.close(); 
+          // 3. Notify others to remove this video from their UI
+          socket.to(socket.roomId).emit('producerClosed', { producerId: p.id });
+      });
+
+      // 4. Remove from the local producers list
+      room.producers = room.producers.filter(p => p.socketId !== socket.id);
     }
   });
 });
