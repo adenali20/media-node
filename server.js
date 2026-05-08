@@ -13,12 +13,7 @@ const consumers = new Map();
 
 const mediaCodecs = [
   { kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 },
-  { 
-    kind: 'video', 
-    mimeType: 'video/VP8', 
-    clockRate: 90000, 
-    parameters: { 'x-google-start-bitrate': 1000 } 
-  }
+  { kind: 'video', mimeType: 'video/VP8', clockRate: 90000, parameters: { 'x-google-start-bitrate': 1000 } }
 ];
 
 (async () => {
@@ -73,15 +68,19 @@ io.on('connection', (socket) => {
     callback({ id: producer.id });
   });
 
-  // NEW: Handle Mute/Unmute and Video Hide/Show broadcasts
+  // NEW: Handle Manual Producer Closure (Screen Share Stop)
+  socket.on('producerClosed', ({ producerId }) => {
+    const room = rooms.get(socket.roomId);
+    if (room) {
+        // Remove from server-side producer list
+        room.producers = room.producers.filter(p => p.id !== producerId);
+    }
+    // Broadcast to everyone else to remove the UI frame
+    socket.to(socket.roomId).emit('producerClosed', { producerId });
+  });
+
   socket.on('toggleMedia', ({ kind, isPaused }) => {
-    console.log(`User ${socket.username} toggled ${kind}. Paused: ${isPaused}`);
-    // Broadcast to everyone else in the room to update their UI
-    socket.to(socket.roomId).emit('peerLayerUpdate', { 
-        username: socket.username, 
-        kind, 
-        isPaused 
-    });
+    socket.to(socket.roomId).emit('peerLayerUpdate', { username: socket.username, kind, isPaused });
   });
 
   socket.on('consume', async ({ rtpCapabilities, remoteProducerId, transportId }, callback) => {
@@ -120,16 +119,13 @@ async function getOrCreateRoom(roomId) {
   if (!rooms.has(roomId)) {
     const router = await worker.createRouter({ mediaCodecs });
     const audioLevelObserver = await router.createAudioLevelObserver({ interval: 400, threshold: -70 });
-    
     audioLevelObserver.on('volumes', (volumes) => {
-        const { producer } = volumes[0]; 
+        const { producer } = volumes[0];
         io.to(roomId).emit('activeSpeaker', { producerId: producer.id });
     });
-
     audioLevelObserver.on('silence', () => {
         io.to(roomId).emit('activeSpeaker', { producerId: null });
     });
-
     rooms.set(roomId, { router, producers: [], audioLevelObserver });
   }
   return rooms.get(roomId);
